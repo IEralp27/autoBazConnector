@@ -1,4 +1,4 @@
-name: Build autoBazConnector APK (Redmi 12C)
+﻿name: Build autoBazConnector APK (Redmi 12C)
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Depoyu indir
         uses: actions/checkout@v4
@@ -18,16 +18,16 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Gradle 8.7 kur
+      - name: Gradle 8.9 kur
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.7'
+          gradle-version: '8.9'
 
       - name: Android SDK lisanslarini onayla
         run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
       - name: Debug APK Derle
-        run: gradle assembleDebug --stacktrace
+        run: gradle assembleDebug --refresh-dependencies --stacktrace
 
       - name: APK Dosyasini Adlandir
         run: cp app/build/outputs/apk/debug/app-debug.apk autoBazConnector-Redmi12C.apk
