@@ -220,7 +220,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val subTitleText = TextView(this).apply {
-            text = "Gerçek hız ölçümüyle öğrenen 3G / 4.5G kule seçici"
+            text = "Tek tuşla: ölç → karşılaştır → en iyi ağı uygula"
             textSize = 12.5f
             setTextColor(Color.parseColor("#94A3B8"))
             setPadding(0, 6, 0, 28)
@@ -228,7 +228,7 @@ class MainActivity : AppCompatActivity() {
 
         val scanBtn = createStyledButton("1. Tara ve Analiz Et", "#0284C7")
         val speedTestBtn = createStyledButton("2. Hız Ölç ve Bu Kuleye Kaydet", "#0D9488")
-        val compareBtn = createStyledButton("3. Root: 3G / 4.5G Otomatik Karşılaştır", "#7C3AED")
+        val oneTapBtn = createStyledButton("▶ TEK TUŞ: EN İYİ AĞI BUL VE UYGULA", "#16A34A").apply { textSize = 16f; setTypeface(null, Typeface.BOLD) }
         val modeBtn = createStyledButton("4. Root: Ağ Modu Seç (4.5G / 3G / Oto)", "#334155")
         val radioInfoBtn = createStyledButton("5. Gizli Radyo Menüsü (*#*#4636#*#*)", "#1E293B")
         val mtkBandBtn = createStyledButton("6. MediaTek Bant Kilidi (EngineerMode)", "#1E293B")
@@ -258,7 +258,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         statusText = TextView(this).apply {
-            text = "Hazır. GPS açık olsun. Önce '1. Tara', sonra bir süre 'Otomatik Ölçüm'ü açık bırakın; uygulama hangi kule/bandın gerçekten hızlı olduğunu öğrenir."
+            text = "Hazır. GPS ve mobil veri açık olsun, yeşil TEK TUŞ butonuna basın. Uygulama 3G ve 4.5G'yi gerçek hızla karşılaştırıp en iyisini uygular (root varsa tamamen otomatik)."
             textSize = 13.5f
             setTextColor(Color.parseColor("#E2E8F0"))
             setPadding(0, 28, 0, 0)
@@ -267,9 +267,9 @@ class MainActivity : AppCompatActivity() {
 
         layout.addView(titleText)
         layout.addView(subTitleText)
+        layout.addView(oneTapBtn)
         layout.addView(scanBtn)
         layout.addView(speedTestBtn)
-        layout.addView(compareBtn)
         layout.addView(modeBtn)
         layout.addView(radioInfoBtn)
         layout.addView(mtkBandBtn)
@@ -287,7 +287,7 @@ class MainActivity : AppCompatActivity() {
 
         scanBtn.setOnClickListener { checkPermissionsAndScan(autoTrigger = false) }
         speedTestBtn.setOnClickListener { runSpeedTest() }
-        compareBtn.setOnClickListener { runModeComparison() }
+        oneTapBtn.setOnClickListener { runAutoOptimize() }
         modeBtn.setOnClickListener { showModeDialog() }
         radioInfoBtn.setOnClickListener { openHiddenRadioInfo() }
         mtkBandBtn.setOnClickListener { openMediaTekBandMode() }
@@ -567,7 +567,7 @@ class MainActivity : AppCompatActivity() {
                 sb.append("➜ SONUÇ: İkisi birbirine yakın. Otomatik modda kalabilirsiniz.\n")
             }
         } else {
-            sb.append("➜ Karar için her iki ağdan da en az 2 ölçüm gerekli. '3. Karşılaştır' (root) veya modu elle değiştirip '2. Hız Ölç' kullanın.\n")
+            sb.append("➜ Karar için her iki ağdan da en az 2 ölçüm gerekli. ▶ TEK TUŞ butonuna basın (root varsa otomatik, yoksa modu elle değiştirip tekrar basın).\n")
         }
         sb.append("\n")
         return sb.toString()
@@ -830,51 +830,123 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 4.5G-only ve 3G-only modlarinda ikiser olcum alip karsilastirir, sonda Otomatik'e doner. */
-    private fun runModeComparison() {
-        if (!busy.compareAndSet(false, true)) {
-            statusText.text = "Başka bir ölçüm sürüyor, bekleyin..."
+    private fun progress(msg: String) {
+        handler.post { statusText.append(msg + "\n") }
+    }
+
+    private fun rateSample(s: SpeedSample): Double {
+        val base = 0.6 * s.sustainedMbps + 0.4 * s.avgMbps
+        return if (isSinkSample(s)) base * 0.7 else base
+    }
+
+    /** Olcer ve kaydeder; (ag turu, puan) dondurur. Hucre degistiyse veya olcum yoksa null. */
+    private fun measureAndRecord(tag: String): Pair<String, Double>? {
+        val before = registeredCell()
+        val s = measureBlocking()
+        val after = registeredCell()
+        if (s == null) {
+            progress("  $tag: ölçüm alınamadı")
+            return null
+        }
+        val same = before != null && (after == null || after.first == before.first)
+        if (!same || before == null) {
+            progress("  $tag: hücre değişti, ölçüm sayılmadı")
+            return null
+        }
+        store.add(before.first, s)
+        progress("  $tag [${before.second}] ${sampleText(s)}")
+        val rat = if (before.first.startsWith("3G")) "3G" else "4G"
+        return Pair(rat, rateSample(s))
+    }
+
+    /** TEK TUS: mevcut agi olcer; root varsa 4.5G ve 3G'yi dener, kazanani uygular, kotu kuleden kacmak icin yeniden kayit dener. */
+    private fun runAutoOptimize() {
+        if (!hasPermissions()) {
+            checkPermissionsAndScan(autoTrigger = false)
             return
         }
-        statusText.text = "Karşılaştırma testi başlıyor (yaklaşık 1-1.5 dk, bağlantı kısa süre kopacak)...\n"
+        if (!busy.compareAndSet(false, true)) {
+            speedText.text = "Başka bir ölçüm sürüyor, bitmesini bekleyin..."
+            return
+        }
+        statusText.text = "▶ TEK TUŞ OPTİMİZASYON başladı (≈2-3 dk). Telefonu kapatmayın, bağlantı kısa süre kopabilir.\n\n"
+        speedText.text = "Optimizasyon sürüyor..."
         executor.execute {
+            var rootOk = false
             try {
-                if (!runSu("id")) {
-                    handler.post {
-                        statusText.append("[BİLGİ] Root yok. Elle yapın: '5. Gizli Radyo Menüsü'nden ağ türünü değiştirip her seferinde '2. Hız Ölç'e basın.\n")
-                    }
+                val results = HashMap<String, MutableList<Double>>()
+                fun collect(r: Pair<String, Double>?) {
+                    if (r != null) results.getOrPut(r.first) { mutableListOf() }.add(r.second)
+                }
+
+                progress("1) Mevcut bağlantı ölçülüyor...")
+                for (i in 1..2) {
+                    collect(measureAndRecord("mevcut #$i"))
+                    Thread.sleep(1_500L)
+                }
+
+                rootOk = runSu("id")
+                if (!rootOk) {
+                    progress("\nRoot yok: ağ modunu kendim değiştiremem. Mevcut bağlantı ölçüldü ve kaydedildi.")
+                    progress("Karşılaştırma için: '5. Gizli Radyo Menüsü'nden ağ türünü değiştirip (LTE only / WCDMA only) bu tuşa tekrar basın. Her basışta o ağın verisi eklenir; iki ağdan da veri olunca sonuç aşağıda çıkar.\n")
                 } else {
                     val plan = listOf(Pair(11, "4.5G (LTE only)"), Pair(2, "3G (WCDMA only)"))
                     for ((mode, label) in plan) {
-                        handler.post { statusText.append("→ $label moduna geçiliyor...\n") }
+                        progress("\n2) $label modu deneniyor...")
                         runSu(*setModeCommands(mode))
                         Thread.sleep(15_000L)
-                        for (round in 1..2) {
-                            val before = registeredCell()
-                            val s = measureBlocking()
-                            if (s != null && before != null) {
-                                store.add(before.first, s)
-                                handler.post { statusText.append("  #$round [${before.second}] ${sampleText(s)}\n") }
-                            } else {
-                                handler.post { statusText.append("  #$round ölçüm alınamadı (bu modda kayıt olunamadı olabilir)\n") }
-                            }
-                            Thread.sleep(2_000L)
+                        for (i in 1..2) {
+                            collect(measureAndRecord("$label #$i"))
+                            Thread.sleep(1_500L)
                         }
                     }
-                    runSu(*setModeCommands(9))
-                    handler.post { statusText.append("→ Otomatik moda dönüldü.\n") }
+
+                    val a4 = results["4G"]?.average()
+                    val a3 = results["3G"]?.average()
+                    val v4 = a4 ?: -1.0
+                    val v3 = a3 ?: -1.0
+                    val pick = when {
+                        a4 == null && a3 == null -> 9
+                        a4 == null -> 2
+                        a3 == null -> 9
+                        v3 > v4 * 1.15 -> 2
+                        else -> 9
+                    }
+                    val pickLabel = if (pick == 2) "Sadece 3G (WCDMA only)" else "Otomatik (4.5G öncelikli)"
+                    val s4 = if (a4 != null) fmt(v4) else "ölçülemedi"
+                    val s3 = if (a3 != null) fmt(v3) else "ölçülemedi"
+                    progress("\nPuanlar (Mbps, batma cezalı): 4.5G = $s4 | 3G = $s3")
+                    progress("3) Uygulanıyor: $pickLabel")
+                    runSu(*setModeCommands(pick))
+                    Thread.sleep(15_000L)
+
+                    val target = (if (pick == 2) v3 else maxOf(v4, v3)).coerceAtLeast(0.0)
+                    var okFinal = false
+                    for (attempt in 1..3) {
+                        val r = measureAndRecord("doğrulama #$attempt")
+                        if (r != null && r.second >= target * 0.8) {
+                            okFinal = true
+                            break
+                        }
+                        if (attempt < 3) {
+                            progress("  Daha iyi bir kule için radyo yenileniyor...")
+                            runSu("cmd connectivity airplane-mode enable", "sleep 1", "cmd connectivity airplane-mode disable")
+                            Thread.sleep(15_000L)
+                        }
+                    }
+                    if (okFinal) {
+                        progress("\nSONUÇ: ✅ $pickLabel uygulandı, hız hedefe ulaştı.")
+                    } else {
+                        progress("\nSONUÇ: ⚠ $pickLabel uygulandı ama hız hedefin altında. Bu konumda/saatte ağ yoğun olabilir; başka yerde veya saatte tekrar deneyin.")
+                    }
                 }
+                handler.post { statusText.append("\n" + techSummary()) }
             } catch (e: Exception) {
-                handler.post { statusText.append("[HATA] ${e.localizedMessage}\n") }
+                progress("[HATA] ${e.localizedMessage}")
+                if (rootOk) runSu(*setModeCommands(9))
             } finally {
                 busy.set(false)
-            }
-            handler.post {
-                if (lastTowers.isNotEmpty()) {
-                    statusText.append("\n" + buildReport(lastTowers).first)
-                } else {
-                    statusText.append("\n" + techSummary())
-                }
+                handler.post { speedText.text = "Optimizasyon bitti. Sonuç aşağıda." }
             }
         }
     }
